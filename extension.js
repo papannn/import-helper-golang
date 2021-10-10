@@ -1,126 +1,109 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
 const vscode = require('vscode');
+const config = require('./config')
 
-// this method is called when your extension is activated
-// your extension is activated the very first time the command is executed
-
-/**
- * @param {vscode.ExtensionContext} context
- */
 function activate(context) {
-
-	// Use the console to output diagnostic information (console.log) and errors (console.error)
-	// This line of code will only be executed once when your extension is activated
-	console.log('Congratulations, your extension "tokopedia-import-helper" is now active!');
-
 	context.subscriptions.push(vscode.workspace.onWillSaveTextDocument(() => {
-		console.log("AAAA")
-		let import_filter = {
-			"usecase": "github.com/tokopedia/gamification-engine/usecase",
-			"domain": "github.com/tokopedia/gamification-engine/domain",
-			"lib": "github.com/tokopedia/gamification-engine/pkg/lib",
-			"enum": "github.com/tokopedia/gamification-engine/common/enums",
-		}
-		let hasil_return = {
-			"": [],
-			"usecase": [],
-			"domain": [],
-			"lib": [],
-			"other": [],
-			"enum": []
-		}
-		// console.log("Test")
-		const multilineImportsGroupRegex = /import \(([^)]+)\)/;
-		// console.log(multilineImportsGroupRegex)
-		let text = vscode.window.activeTextEditor.document.getText()
-		let start = 0
-		for (let line in text.split('\n')){
-			console.log(text.split('\n')[line])
-			if(text.split('\n')[line].includes('import (')){
-				break;
-			}
-			start++;
-		}
-		let end = start
-		for (var line of text.split('\n').slice(start)) {
-			if (line.includes(')')) {
-			  break;
-			}
-			end++;
-		  }
-		console.log(start)
-		console.log(end)
-		let range = new vscode.Range(start, 0, end, Number.MAX_VALUE)
-		
-		let importsMatch = text.match(multilineImportsGroupRegex)
-		// console.log(importsMatch)
-		let hasil = importsMatch[1].split('\n').filter(line => line.trim() != '');
-		hasil.forEach((ele) => {
-			let flag = false
-			Object.entries(import_filter).forEach(([key, val]) => {
-				// console.log(key); // the name of the current key.
-				// console.log(val); // the value of the current key.
-				if(ele.includes('//')){
-					flag = true
-				}
-				
-				if (!flag && ele.includes(val)){
-					hasil_return[key].push(ele)
-					flag = true
-				}
-				
-			  });
-			if(!flag){
-				console.log("WAKARAI")
-				console.log(ele)
-				if(!ele.includes("github")) {
-					hasil_return[''].push(ele);
-				}else {
-					hasil_return['other'].push(ele)
-				}
-			}
-		})
-		console.log(importsMatch)
-		// console.log("COBA")
-		let import_returns = "import (\n"
+		const orgName = config.orgs
+		const repoName = vscode.workspace.name
 
-		// console.log(hasil)
-		console.log(hasil_return)
-		Object.entries(hasil_return).forEach(([key, val]) => {
-			if(hasil_return[key].length !== 0){
-				if(key !== "")
-					import_returns += '\t//' + key + '\n'
-				hasil_return[key].forEach(element => {
-					import_returns += element + '\n';
-				});
-				import_returns += '\n'
+		const categories = {
+			go: [],
+			self: {
+				usecase: [],
+				domain: [],
+				grpc: [],
+				nsq: [],
+				http: [],
+				lib: [],
+				enum: [],
+			},
+			self_etc: [],
+			sister: {
+				tdk: [],
+				proto: [],
+			},
+			sister_etc: [],
+			third_party: [],
+		}
+
+		// get import lines
+		const currentWindow = vscode.window.activeTextEditor.document.getText()
+		const importRegex = /import \(([^)]+)\)/;
+		const importsMatch = currentWindow.match(importRegex)
+		const imports = (importsMatch[1] || '').split('\n').filter(line => line.trim() != '')
+
+		// push import line to respective categories
+		imports.forEach(line => {
+			// skip comment
+			if (line.startsWith('\t//')) return
+
+			// local repo
+			if (line.includes(`${orgName}/${repoName}`)) {
+				for (const category in categories.self) {
+					if (line.includes(category)) return categories.self[category].push(line)
+				}
+
+				return categories.self_etc.push(line)
 			}
+
+			// sister repo (same orgs)
+			if (line.includes(orgName)) {
+				for (const category in categories.sister) {
+					if (line.includes(category)) return categories.sister[category].push(line)
+				}
+
+				return categories.sister_etc.push(line)
+			}
+
+			// built in and third party
+			if (line.includes('github')) return categories.third_party.push(line)
+			if (line.includes('.')) return categories.third_party.push(line)
+
+			categories.go.push(line)
 		})
-		import_returns = import_returns.substr(0,import_returns.length-1);
-		import_returns += ")"
-		let edit = new vscode.WorkspaceEdit()
-		edit.replace(vscode.window.activeTextEditor.document.uri, range, import_returns)
+
+		// import name adapter
+		const import_name_map = {
+			go: '',
+			self_etc: 'other',
+			sister_etc: `other ${orgName} repo`,
+		}
+
+		// get categories string recursively
+		const processCategory = (name, category) => {
+			let result = ''
+
+			// control recursive flows
+			if (!category) return
+			if (category instanceof Object)
+				Object.entries(category).forEach(([key, value]) => result += processCategory(key, value))
+			if (!(category instanceof Array)) return result
+			if (!category.length) return result
+
+			// get import name
+			const importName = import_name_map[name] != null ? import_name_map[name] : name
+			if (importName) result += `\t//${importName}\n`
+
+			category.forEach(el => result += `${el}\n`)
+			return result + '\n'
+		}
+
+		// get new import lines
+		const newImportLines = processCategory('', categories).replace(/\n$/, "") // remove last new line
+		const result = `import (\n${newImportLines})`
+		const lines = currentWindow.split('\n')
+		const startIndex = lines.findIndex(el => el.includes('import ('))
+		const endIndex = lines.findIndex((el, i) => el.includes(')') && i > startIndex)
+
+		// edit & save workspace
+		const edit = new vscode.WorkspaceEdit()
+		const range = new vscode.Range(startIndex, 0, endIndex, Number.MAX_VALUE)
+		edit.replace(vscode.window.activeTextEditor.document.uri, range, result)
 		vscode.workspace.applyEdit(edit).then(vscode.window.activeTextEditor.document.save)
-		console.log(import_returns)
-		// vscode.workspace.applyEdit()
 	}))
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with  registerCommand
-	// The commandId parameter must match the command field in package.json
-	// let disposable = vscode.commands.registerCommand('tokopedia-import-helper.helloWorld', function () {
-	// 	// The code you place here will be executed every time your command is executed
-	// 	// Display a message box to the user
-	// 	vscode.window.showInformationMessage('Hello World!!! from tokopedia-import-helper!');
-	// });
-
-	// context.subscriptions.push(ini);
-	// context.subscriptions.push(disposable);
-	// vscode.workspace.onDidChangeConfiguration();
 }
 
-// this method is called when your extension is deactivated
-function deactivate() {}
+function deactivate() { }
 
 module.exports = {
 	activate,
